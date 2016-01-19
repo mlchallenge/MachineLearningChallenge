@@ -1,0 +1,97 @@
+The goal is to estimate a "score" for each merchant. 
+
+One concrete interpretation for this "score" is a measure of a merchant's likelihood to generate sustainable revenue for Paytm. 
+
+From here we need to make 2 assumptions:
+Assumption 1: "current revenue" is postively correlated to future revenue, this is reasonable since merchants performance tend to have momentum. Current revenue can be calculated as follows in SQL
+```
+SELECT a.merchant_id, SUM(a.merchant_revenue*commission_percent) paytm_revenue
+FROM ( 
+	SELECT merchant_id, t1, t2, t4, SUM(qty_ordered*item_selling_price) merchant_revenue FROM transactions GROUP BY merchant_id, t1, t2, t4
+) a INNER JOIN profits b ON a.merchant_id = b.merchant_id AND b.t1 = b.t1 AND b.t2 = b.t2 AND b.t4 = b.t4
+GROUP BY a.merchant_id
+```
+
+Assumption 2: "return/cancel rate" negatively correlate to future revenue, this is reasonable since high return/cancel rate represents bad customer experience, which lowers long term revenue. Return/cancel rate can be calculate in SQL as follows:
+```
+SELECT a.merchant_id, b.rc_num/a.sum_qty rc_rate
+FROM ( 
+	SELECT merchant_id, SUM(qty_ordered) sum_qty FROM transactions GROUP BY merchant_id
+) a INNER JOIN (
+	SELECT merchant_id, SUM(cancel_num + return_num) rc_num FROM cancels_returns GROUP BY merchant_id
+) b ON a.merchant_id = b.merchant_id;
+```
+
+Under these 2 assumptions, technically we can calculate an approximate score by combining current revenue and order/cancel rate. However, these metrics are not very actionable (i.e. asking a merchant to increase revenue is not very informative). So let's to find more actionable "factors". 
+
+
+Here are a couple of "factors" that might correlate with our "current revenue" metric
+
+1. Distinct number of root categories sold per merchant. We can quantify the degree of correlation using a simple pearson correlation measure. In Postgresql, this can be calculated to be 0.0925 
+```
+WITH t1 AS (
+	SELECT merchant_id, COUNT(DISTINCT t1) t1_num FROM transactions GROUP BY merchant_id 
+)
+SELECT corr(t1_num, paytm_revenue) FROM t1 a INNER JOIN paytm_revenue_table b ON a.merchant_id = b.merchant_id
+```
+
+2. Distinct number of sub categories sold per merchant. Pearson correlation is calculated to be 0.1554
+```
+WITH t2 as  (
+	SELECT merchant_id, COUNT(DISTINCT t2) t2_num FROM transactions GROUP BY merchant_id
+) 
+SELECT corr(t2_num, paytm_revenue) FROM t2 a INNER JOIN d_score b ON a.merchant_id = b.merchant_id
+```
+
+
+Here are a couple of "factors" that might correlate with our "return/cancel rate" metric
+
+1. Average rate of late fulfillment. Pearson correlation is calculated to be 0.1047
+```
+WITH late_fulfillment AS (
+	SELECT merchant_id, AVG( DATE(fulfillment_shipped_at) - DATE(item_ship_by_date) ) late_fulfillment_days FROM transactions GROUP BY merchant_id
+)
+SELECT CORR(late_fulfillment_days, rc_rate) FROM late_fulfillment a INNER JOIN rc_rate_table b on a.merchant_id = b.merchant_id
+```
+
+2. Average amount of fulfillment time. Pearson measure for this is 0.1037
+```
+WITH fulfillment AS (
+	SELECT merchant_id, AVG( date(fulfillment_shipped_at) - date(item_created_at)) fulfillment_days FROM transactions GROUP BY merchant_id
+) 
+SELECT corr(fulfillment_days, rc_rate) FROM late_ship a INNER JOIN d_rc b on a.merchant_id = b.merchant_id
+```
+
+The pearson correlation values can be used as "weights" for the corresponding factors to calculate a total "score" for each merchant. 
+
+We can do this simple calculation using Python numpy as follows. 
+```
+import csv
+import numpy as np
+from sklearn import preprocessing
+
+merchant_ids = []
+factors = []
+
+# read factors file 
+with open('factors.csv') as file:
+	reader = csv.reader(file, delimiter=',')
+	for row in reader:
+		merchant_ids.append(row[0])
+		factors.append(row[1:])
+
+# person weights calculated previously
+pearson_weights = np.array([0.0925, 0.1554, -0.1047, -0.1037])
+# normalize the input
+factors_scaled = preprocessing.scale(np.array(factors, dtype=np.float64) )
+
+#write score to file
+with open('scores.csv', 'a') as file:
+	for row in zip(merchant_ids, sum((factors_scaled*pearson_weights).T)):
+		file.write(row[0] + ',' + str(row[1]) + '\n')
+```
+
+This yield the following "scores" for each merchant. The effect can be AB Tested since the factors involved are actionable. 
+
+
+
